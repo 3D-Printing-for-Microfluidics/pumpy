@@ -1,3 +1,4 @@
 *.pyc
 *.egg-info/
 *.egg
+*.ipynb_checkpoints
