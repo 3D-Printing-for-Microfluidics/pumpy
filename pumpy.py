@@ -385,7 +385,6 @@ class Pump33:
         self.flowrate2 = None
         self.direction1 = None
         self.direction2 = None
-        self.targetvolume = None
 
         """Query model and version number of firmware to check pump is
         OK. Responds with a load of stuff, but the last three characters
@@ -401,7 +400,7 @@ class Pump33:
                 raise PumpError('No response from pump at address %s' %
                                 self.address)
             else:
-                print (repr(resp))
+                print ('%s: %s ' % (self.name, resp[1:-4]))
                 
         except PumpError:
             self.serialcon.close()
