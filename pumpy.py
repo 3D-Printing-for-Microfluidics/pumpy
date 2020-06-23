@@ -1,6 +1,14 @@
+import sys
 import argparse
 import logging
 import serial
+
+
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)-5.5s]  %(message)s",
+)
 
 
 def remove_crud(string):
@@ -414,7 +422,9 @@ class Pump33:
 
             if int(resp[-3:-1]) != int(self.address):
                 raise PumpError("No response from pump at address %s" % self.address)
-            print("%s: %s " % (self.name, resp[1:-4]))
+            logging.info(
+                "Found pump %s at address %s", resp[1:-4], self.address,
+            )
 
         except PumpError:
             self.serial.close()
@@ -470,7 +480,6 @@ class Pump33:
                 )
             elif returned_mode == mode:
                 self.mode = mode
-                print("%s: mode set to %s" % (self.name, self.mode))
                 logging.info("%s: mode set to %s", self.name, self.mode)
         else:
             raise PumpError("%s: unknown response to setmode" % self.name)
@@ -520,7 +529,6 @@ class Pump33:
                 )
             elif float(returned_diameter) == float(diameter):
                 self.diameter1 = float(returned_diameter)
-                print("%s: syringe 1 diameter set to %s mm" % (self.name, self.diameter1))
                 logging.info(
                     "%s: syringe 1 diameter set to %s mm", self.name, self.diameter1
                 )
@@ -585,7 +593,6 @@ class Pump33:
                 )
             elif float(returned_diameter) == float(diameter):
                 self.diameter2 = float(returned_diameter)
-                print("%s: syringe 2 diameter set to %s mm" % (self.name, self.diameter2))
                 logging.info(
                     "%s: syringe 2 diameter set to %s mm", self.name, self.diameter2
                 )
@@ -632,10 +639,6 @@ class Pump33:
                 )
             elif float(returned_flowrate) == float(flowrate):
                 self.flowrate1 = float(returned_flowrate)
-                print(
-                    "%s: syringe 1 flow rate set to %s uL/min"
-                    % (self.name, str(self.flowrate1))
-                )
                 logging.info(
                     "%s: syringe 1 flow rate set to %s uL/min",
                     self.name,
@@ -699,10 +702,6 @@ class Pump33:
                 )
             elif float(returned_flowrate) == float(flowrate):
                 self.flowrate2 = float(returned_flowrate)
-                print(
-                    "%s: syringe 2 flow rate set to %s uL/min"
-                    % (self.name, str(self.flowrate2))
-                )
                 logging.info(
                     "%s: syringe 2 flow rate set to %s uL/min",
                     self.name,
@@ -756,7 +755,6 @@ class Pump33:
                 )
             elif returned_direction == direction:
                 self.direction1 = direction
-                print("%s: syringe 1 direction set to %s" % (self.name, self.direction1))
                 logging.info(
                     "%s: syringe 1 direction set to %s", self.name, self.direction1
                 )
@@ -819,7 +817,6 @@ class Pump33:
                 )
             else:
                 self.direction2 = direction
-                print("%s: syringe 2 direction set to %s" % (self.name, self.direction2))
                 logging.info(
                     "%s: syringe 2 direction set to %s", self.name, self.direction2
                 )
