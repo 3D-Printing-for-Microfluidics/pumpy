@@ -431,14 +431,14 @@ class Pump33:
         return string
 
     def write(self, command):
-        self.serial.write(self.address + command + "\r")
+        self.serial.write(bytes(self.address + command + "\r", encoding="ascii"))
 
     def read(self, num_bytes=5):
         response = self.serial.read(num_bytes)
 
         if len(response) == 0:
             raise PumpError("%s: no response to command" % self.name)
-        return response
+        return response.decode().rstrip()
 
     def setmode(self, mode):
         """Set pump mode.
