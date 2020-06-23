@@ -1,7 +1,6 @@
-from __future__ import print_function
-import serial
 import argparse
 import logging
+import serial
 
 
 def remove_crud(string):
@@ -32,13 +31,9 @@ class Chain(serial.Serial):
     logs creation of the Chain.
     """
 
-    def __init__(self, port):
+    def __init__(self, port, stopbits=serial.STOPBITS_TWO):
         serial.Serial.__init__(
-            self,
-            port=port,
-            stopbits=serial.STOPBITS_TWO,
-            parity=serial.PARITY_NONE,
-            timeout=2,
+            self, port=port, stopbits=stopbits, parity=serial.PARITY_NONE, timeout=2,
         )
         self.flushOutput()
         self.flushInput()
@@ -58,7 +53,7 @@ class Pump:
 
     def __init__(self, chain, address=0, name="Pump 11"):
         self.name = name
-        self.serialcon = chain
+        self.serial = chain
         self.address = "{0:02.0f}".format(address)
         self.diameter = None
         self.flowrate = None
@@ -77,14 +72,11 @@ class Pump:
             if int(resp[-3:-1]) != int(self.address):
                 raise PumpError("No response from pump at address %s" % self.address)
         except PumpError:
-            self.serialcon.close()
+            self.serial.close()
             raise
 
         logging.info(
-            "%s: created at address %s on %s",
-            self.name,
-            self.address,
-            self.serialcon.port,
+            "%s: created at address %s on %s", self.name, self.address, self.serial.port,
         )
 
     def __repr__(self):
@@ -94,15 +86,14 @@ class Pump:
         return string
 
     def write(self, command):
-        self.serialcon.write(self.address + command + "\r")
+        self.serial.write(self.address + command + "\r")
 
-    def read(self, bytes=5):
-        response = self.serialcon.read(bytes)
+    def read(self, num_bytes=5):
+        response = self.serial.read(num_bytes)
 
         if len(response) == 0:
             raise PumpError("%s: no response to command" % self.name)
-        else:
-            return response
+        return response
 
     def setdiameter(self, diameter):
         """Set syringe diameter (millimetres).
@@ -119,9 +110,9 @@ class Pump:
 
         # Pump only considers 2 d.p. - anymore are ignored
         if len(diameter) > 5:
-            if diameter[2] is ".":  # e.g. 30.2222222
+            if diameter[2] == ".":  # e.g. 30.2222222
                 diameter = diameter[0:5]
-            elif diameter[1] is ".":  # e.g. 3.222222
+            elif diameter[1] == ".":  # e.g. 3.222222
                 diameter = diameter[0:4]
 
             diameter = remove_crud(diameter)
@@ -210,7 +201,7 @@ class Pump:
                 self.write("REV")
             else:
                 raise PumpError("%s: unknown response to to infuse" % self.name)
-            resp = self.serialcon.read(5)
+            resp = self.serial.read(5)
 
         logging.info("%s: infusing", self.name)
 
@@ -226,7 +217,6 @@ class Pump:
                 self.write("REV")
             else:
                 raise PumpError("%s: unknown response to withdraw" % self.name)
-                break
             resp = self.read(5)
 
         logging.info("%s: withdrawing", self.name)
@@ -238,8 +228,7 @@ class Pump:
 
         if resp[-1] != ":":
             raise PumpError("%s: unexpected response to stop" % self.name)
-        else:
-            logging.info("%s: stopped", self.name)
+        logging.info("%s: stopped", self.name)
 
     def settargetvolume(self, targetvolume):
         """Set the target volume to infuse or withdraw (microlitres)."""
@@ -263,21 +252,21 @@ class Pump:
 
         while True:
             # Read once
-            self.serialcon.write(self.address + "VOL\r")
+            self.serial.write(self.address + "VOL\r")
             resp1 = self.read(15)
 
             if ":" in resp1 and i == 0:
                 raise PumpError(
-                    "%s: not infusing/withdrawing - infuse or " "withdraw first",
-                    self.name,
+                    "%s: not infusing/withdrawing - infuse or "
+                    "withdraw first" % self.name
                 )
-            elif ":" in resp1 and i != 0:
+            if ":" in resp1 and i != 0:
                 # pump has already come to a halt
                 logging.info("%s: target volume reached, stopped", self.name)
                 break
 
             # Read again
-            self.serialcon.write(self.address + "VOL\r")
+            self.serial.write(self.address + "VOL\r")
             resp2 = self.read(15)
 
             # Check if they're the same - if they are, break, otherwise continue
@@ -304,7 +293,7 @@ class PHD2000(Pump):
         if resp[-1] == "*":
             logging.info("%s: stopped", self.name)
         else:
-            raise PumpError("%s: unexpected response to stop", self.name)
+            raise PumpError("%s: unexpected response to stop" % self.name)
 
     def settargetvolume(self, targetvolume):
         """Set the target volume to infuse or withdraw (microlitres)."""
@@ -333,8 +322,9 @@ class PHD2000(Pump):
 class MightyMini:
     def __init__(self, chain, name="Mighty Mini"):
         self.name = name
-        self.serialcon = chain.serialcon
-        logging.info("%s: created on %s", self.name, self.serialcon.port)
+        self.serial = chain.serial
+        self.flowrate = None
+        logging.info("%s: created on %s", self.name, self.serial.port)
 
     def __repr__(self):
         string = ""
@@ -348,46 +338,44 @@ class MightyMini:
             flowrate = 9999
             logging.warning("%s: flow rate limited to %s uL/min", self.name, flowrate)
 
-        self.serialcon.write("FM" + "{:04d}".format(flowrate))
-        resp = self.serialcon.read(3)
-        self.serialcon.flushInput()
+        self.serial.write("FM" + "{:04d}".format(flowrate))
+        resp = self.serial.read(3)
+        self.serial.flushInput()
         if len(resp) == 0:
-            raise PumpError("%s: no response to set flowrate", self.name)
-        elif resp[0] == "O" and resp[1] == "K":
+            raise PumpError("%s: no response to set flowrate" % self.name)
+        if resp[0] == "O" and resp[1] == "K":
             # flow rate sent, check it is correct
-            self.serialcon.write("CC")
-            resp = self.serialcon.read(11)
+            self.serial.write("CC")
+            resp = self.serial.read(11)
             returned_flowrate = int(float(resp[5:-1]) * 1000)
             if returned_flowrate != flowrate:
                 raise PumpError(
                     "%s: set flowrate (%s uL/min) does not match"
-                    " flowrate returned by pump (%s uL/min)",
-                    self.name,
-                    flowrate,
-                    returned_flowrate,
+                    " flowrate returned by pump (%s uL/min)"
+                    % (self.name, flowrate, returned_flowrate)
                 )
-            elif returned_flowrate == flowrate:
+            if returned_flowrate == flowrate:
                 self.flowrate = returned_flowrate
                 logging.info("%s: flow rate set to %s uL/min", self.name, self.flowrate)
         else:
             raise PumpError(
-                "%s: error setting flow rate (%s uL/min)", self.name, flowrate
+                "%s: error setting flow rate (%s uL/min)" % (self.name, flowrate)
             )
 
     def infuse(self):
-        self.serialcon.write("RU")
-        resp = self.serialcon.read(3)
+        self.serial.write("RU")
+        resp = self.serial.read(3)
         if len(resp) == 0:
-            raise PumpError("%s: no response to infuse", self.name)
-        elif resp[0] == "O" and resp[1] == "K":
+            raise PumpError("%s: no response to infuse" % self.name)
+        if resp[0] == "O" and resp[1] == "K":
             logging.info("%s: infusing", self.name)
 
     def stop(self):
-        self.serialcon.write("ST")
-        resp = self.serialcon.read(3)
+        self.serial.write("ST")
+        resp = self.serial.read(3)
         if len(resp) == 0:
-            raise PumpError("%s: no response to stop", self.name)
-        elif resp[0] == "O" and resp[1] == "K":
+            raise PumpError("%s: no response to stop" % self.name)
+        if resp[0] == "O" and resp[1] == "K":
             logging.info("%s: stopping", self.name)
 
 
@@ -404,7 +392,7 @@ class Pump33:
 
     def __init__(self, chain, address=0, name="Pump 33"):
         self.name = name
-        self.serialcon = chain
+        self.serial = chain
         self.address = "{0:02.0f}".format(address)
         self.mode = None
         self.diameter1 = None
@@ -426,16 +414,14 @@ class Pump33:
 
             if int(resp[-3:-1]) != int(self.address):
                 raise PumpError("No response from pump at address %s" % self.address)
-            else:
-                print("%s: %s " % (self.name, resp[1:-4]))
+            print("%s: %s " % (self.name, resp[1:-4]))
 
         except PumpError:
-            self.serialcon.close()
+            self.serial.close()
             raise
 
         logging.info(
-            "%s: created at address %s on %s"
-            % (self.name, self.address, self.serialcon.port)
+            "%s: created at address %s on %s", self.name, self.address, self.serial.port,
         )
 
     def __repr__(self):
@@ -445,15 +431,14 @@ class Pump33:
         return string
 
     def write(self, command):
-        self.serialcon.write(self.address + command + "\r")
+        self.serial.write(self.address + command + "\r")
 
-    def read(self, bytes=5):
-        response = self.serialcon.read(bytes)
+    def read(self, num_bytes=5):
+        response = self.serial.read(num_bytes)
 
         if len(response) == 0:
             raise PumpError("%s: no response to command" % self.name)
-        else:
-            return response
+        return response
 
     def setmode(self, mode):
         """Set pump mode.
@@ -478,13 +463,15 @@ class Pump33:
             # Check mode was set accurately
             if returned_mode != mode:
                 logging.error(
-                    "%s: set mode (%s) does not match mode"
-                    " returned by pump (%s)" % (self.name, mode, returned_mode)
+                    "%s: set mode (%s) does not match mode" " returned by pump (%s)",
+                    self.name,
+                    mode,
+                    returned_mode,
                 )
             elif returned_mode == mode:
                 self.mode = mode
                 print("%s: mode set to %s" % (self.name, self.mode))
-                logging.info("%s: mode set to %s" % (self.name, self.mode))
+                logging.info("%s: mode set to %s", self.name, self.mode)
         else:
             raise PumpError("%s: unknown response to setmode" % self.name)
 
@@ -506,7 +493,7 @@ class Pump33:
         if len(diameter) > 6:
             diameter = diameter[0:6]
             diameter = remove_crud(diameter)
-            logging.warning("%s: diameter truncated to %s mm" % (self.name, diameter))
+            logging.warning("%s: diameter truncated to %s mm", self.name, diameter)
         else:
             diameter = remove_crud(diameter)
 
@@ -526,13 +513,16 @@ class Pump33:
             if float(returned_diameter) != float(diameter):
                 logging.error(
                     "%s: set diameter (%s mm) does not match diameter"
-                    "returned by pump (%s mm)" % (self.name, diameter, returned_diameter)
+                    "returned by pump (%s mm)",
+                    self.name,
+                    diameter,
+                    returned_diameter,
                 )
             elif float(returned_diameter) == float(diameter):
                 self.diameter1 = float(returned_diameter)
                 print("%s: syringe 1 diameter set to %s mm" % (self.name, self.diameter1))
                 logging.info(
-                    "%s: syringe 1 diameter set to %s mm" % (self.name, self.diameter1)
+                    "%s: syringe 1 diameter set to %s mm", self.name, self.diameter1
                 )
         else:
             raise PumpError("%s: unknown response to setdiameter1" % self.name)
@@ -568,7 +558,7 @@ class Pump33:
         if len(diameter) > 6:
             diameter = diameter[0:6]
             diameter = remove_crud(diameter)
-            logging.warning("%s: diameter truncated to %s mm" % (self.name, diameter))
+            logging.warning("%s: diameter truncated to %s mm", self.name, diameter)
         else:
             diameter = remove_crud(diameter)
 
@@ -588,13 +578,16 @@ class Pump33:
             if float(returned_diameter) != float(diameter):
                 logging.error(
                     "%s: set diameter (%s mm) does not match diameter"
-                    " returned by pump (%s mm)" % (self.name, diameter, returned_diameter)
+                    " returned by pump (%s mm)",
+                    self.name,
+                    diameter,
+                    returned_diameter,
                 )
             elif float(returned_diameter) == float(diameter):
                 self.diameter2 = float(returned_diameter)
                 print("%s: syringe 2 diameter set to %s mm" % (self.name, self.diameter2))
                 logging.info(
-                    "%s: syringe 2 diameter set to %s mm" % (self.name, self.diameter2)
+                    "%s: syringe 2 diameter set to %s mm", self.name, self.diameter2
                 )
         else:
             raise PumpError("%s: unknown response to setdiameter2" % self.name)
@@ -615,9 +608,7 @@ class Pump33:
         if len(flowrate) > 6:
             flowrate = flowrate[0:6]
             flowrate = remove_crud(flowrate)
-            logging.warning(
-                "%s: flow rate truncated to %s uL/min" % (self.name, flowrate)
-            )
+            logging.warning("%s: flow rate truncated to %s uL/min", self.name, flowrate)
         else:
             flowrate = remove_crud(flowrate)
 
@@ -634,8 +625,10 @@ class Pump33:
             if float(returned_flowrate) != float(flowrate):
                 logging.error(
                     "%s: set flowrate (%s uL/min) does not match"
-                    "flowrate returned by pump (%s uL/min)"
-                    % (self.name, flowrate, returned_flowrate)
+                    "flowrate returned by pump (%s uL/min)",
+                    self.name,
+                    flowrate,
+                    returned_flowrate,
                 )
             elif float(returned_flowrate) == float(flowrate):
                 self.flowrate1 = float(returned_flowrate)
@@ -644,8 +637,9 @@ class Pump33:
                     % (self.name, str(self.flowrate1))
                 )
                 logging.info(
-                    "%s: syringe 1 flow rate set to %s uL/min"
-                    % (self.name, str(self.flowrate1))
+                    "%s: syringe 1 flow rate set to %s uL/min",
+                    self.name,
+                    str(self.flowrate1),
                 )
         elif "OOR" in resp:
             raise PumpError(
@@ -681,9 +675,7 @@ class Pump33:
         if len(flowrate) > 6:
             flowrate = flowrate[0:6]
             flowrate = remove_crud(flowrate)
-            logging.warning(
-                "%s: flow rate truncated to %s uL/min" % (self.name, flowrate)
-            )
+            logging.warning("%s: flow rate truncated to %s uL/min", self.name, flowrate)
         else:
             flowrate = remove_crud(flowrate)
 
@@ -700,8 +692,10 @@ class Pump33:
             if float(returned_flowrate) != float(flowrate):
                 logging.error(
                     "%s: set flowrate (%s uL/min) does not match"
-                    "flowrate returned by pump (%s uL/min)"
-                    % (self.name, flowrate, returned_flowrate)
+                    "flowrate returned by pump (%s uL/min)",
+                    self.name,
+                    flowrate,
+                    returned_flowrate,
                 )
             elif float(returned_flowrate) == float(flowrate):
                 self.flowrate2 = float(returned_flowrate)
@@ -710,8 +704,9 @@ class Pump33:
                     % (self.name, str(self.flowrate2))
                 )
                 logging.info(
-                    "%s: syringe 2 flow rate set to %s uL/min"
-                    % (self.name, str(self.flowrate2))
+                    "%s: syringe 2 flow rate set to %s uL/min",
+                    self.name,
+                    str(self.flowrate2),
                 )
         elif "OOR" in resp:
             raise PumpError(
@@ -723,7 +718,7 @@ class Pump33:
     def setdirection1(self, direction):
         """Set syringe 1 direction.
 
-        Pump 33 has 3 direction setting: INF (infusion), REF (refill), REV
+        Pump 33 has 3 direction settings: INF (infusion), REF (refill), REV
         (reverse).
         """
         # Check if the input is a valid direction command
@@ -754,14 +749,16 @@ class Pump33:
             if returned_direction != direction:
                 logging.error(
                     "%s: set syringe 1 direction (%s) does not match"
-                    " direction returned by pump (%s)"
-                    % (self.name, direction, returned_direction)
+                    " direction returned by pump (%s)",
+                    self.name,
+                    direction,
+                    returned_direction,
                 )
             elif returned_direction == direction:
                 self.direction1 = direction
                 print("%s: syringe 1 direction set to %s" % (self.name, self.direction1))
                 logging.info(
-                    "%s: syringe 1 direction set to %s" % (self.name, self.direction1)
+                    "%s: syringe 1 direction set to %s", self.name, self.direction1
                 )
         else:
             raise PumpError("%s: unknown response to setdirection1" % self.name)
@@ -807,20 +804,24 @@ class Pump33:
             if returned_direction != direction and returned_par == "ON":
                 logging.error(
                     "%s: set syringe 2 direction (%s) does not match"
-                    " direction returned by pump (%s)"
-                    % (self.name, direction, returned_direction)
+                    " direction returned by pump (%s)",
+                    self.name,
+                    direction,
+                    returned_direction,
                 )
             elif returned_direction == direction and returned_par == "OFF":
                 logging.error(
                     "%s: set syringe 2 direction (%s) does not match"
-                    " direction returned by pump (%s)"
-                    % (self.name, direction, returned_direction)
+                    " direction returned by pump (%s)",
+                    self.name,
+                    direction,
+                    returned_direction,
                 )
             else:
                 self.direction2 = direction
                 print("%s: syringe 2 direction set to %s" % (self.name, self.direction2))
                 logging.info(
-                    "%s: syringe 2 direction set to %s" % (self.name, self.direction2)
+                    "%s: syringe 2 direction set to %s", self.name, self.direction2
                 )
         else:
             raise PumpError("%s: unknown response to setdirection2" % self.name)
@@ -833,8 +834,7 @@ class Pump33:
 
         if resp[-1] != ">" and resp[-1] != "<":
             raise PumpError("%s: unknown response to start" % self.name)
-        else:
-            logging.info("%s: started" % self.name)
+        logging.info("%s: started", self.name)
 
     def stop(self):
         """Stop the pump"""
@@ -844,8 +844,7 @@ class Pump33:
 
         if resp[-1] != ":":
             raise PumpError("%s: unexpected response to stop" % self.name)
-        else:
-            logging.info("%s: stopped" % self.name)
+        logging.info("%s: stopped", self.name)
 
     def par(self):
         """Switch the pump between parallel and reciprocal pumping
@@ -866,16 +865,15 @@ class Pump33:
                 # check if Parallel/Reciprocal has been set correctlry
                 self.write("PAR")
                 resp = self.read(15)
-
                 returned_par = resp[1:-4]
-
                 if returned_par != "OFF":
                     logging.error(
-                        "%s: set Parallel/Reciprocal (%s) does not work" % self.name
+                        "%s: set Parallel/Reciprocal (%s) does not work",
+                        self.name,
+                        self.name,
                     )
                 elif returned_par == "OFF":
-                    logging.info("%s: switch from Parallel to Reciprocal" % self.name)
-
+                    logging.info("%s: switch from Parallel to Reciprocal", self.name)
         elif original_par == "OFF":
             self.write("PAR ON")
             resp = self.read(5)
@@ -884,15 +882,15 @@ class Pump33:
                 # check if Parallel/Reciprocal has been set correctlry
                 self.write("PAR")
                 resp = self.read(15)
-
                 returned_par = resp[1:-4]
-
                 if returned_par != "ON":
                     logging.error(
-                        "%s: set Parallel/Reciprocal (%s) does not work" % self.name
+                        "%s: set Parallel/Reciprocal (%s) does not work",
+                        self.name,
+                        self.name,
                     )
                 elif returned_par == "ON":
-                    logging.info("%s: switch from Reciprocal to Parallel" % self.name)
+                    logging.info("%s: switch from Reciprocal to Parallel", self.name)
         else:
             raise PumpError("%s: unknown response to setdirection" % self.name)
 
@@ -939,9 +937,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.MightyMini:
-        chain = Chain(args.port, stopbits=serial.STOPBITS_ONE)
+        pimp_chain = Chain(args.port, stopbits=serial.STOPBITS_ONE)
     else:
-        chain = Chain(args.port)
+        pimp_chain = Chain(args.port)
 
     # Command precedence:
     # 1. stop
@@ -952,11 +950,11 @@ if __name__ == "__main__":
 
     try:
         if args.PHD2000:
-            pump = PHD2000(chain, args.address, name="PHD2000")
+            pump = PHD2000(pimp_chain, args.address, name="PHD2000")
         elif args.MightyMini:
-            pump = MightyMini(chain, name="MightyMini")
+            pump = MightyMini(pimp_chain, name="MightyMini")
         else:
-            pump = Pump(chain, args.address, name="11")
+            pump = Pump(pimp_chain, args.address, name="11")
 
         if args.stop:
             pump.stop()
@@ -980,4 +978,4 @@ if __name__ == "__main__":
             if args.wait:
                 pump.waituntiltarget()
     finally:
-        chain.close()
+        pimp_chain.close()
