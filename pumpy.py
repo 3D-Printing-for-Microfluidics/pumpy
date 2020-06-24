@@ -41,7 +41,7 @@ class Chain(serial.Serial):
 
     def __init__(self, port, stopbits=serial.STOPBITS_TWO):
         serial.Serial.__init__(
-            self, port=port, stopbits=stopbits, parity=serial.PARITY_NONE, timeout=2,
+            self, port=port, stopbits=stopbits, parity=serial.PARITY_NONE, timeout=0.1,
         )
         self.flushOutput()
         self.flushInput()
@@ -398,7 +398,7 @@ class Pump33:
         name: used in logging. Default is Pump 33.
     """
 
-    def __init__(self, chain, address=0, name="Pump 33"):
+    def __init__(self, chain, address=0, name="Pump 33", verbose=False):
         self.name = name
         self.serial = chain
         self.address = "{0:02.0f}".format(address)
@@ -409,6 +409,7 @@ class Pump33:
         self.flowrate2 = None
         self.direction1 = None
         self.direction2 = None
+        self.verbose = verbose
 
         """Query model and version number of firmware to check pump is
         OK. Responds with a load of stuff, but the last three characters
@@ -417,9 +418,7 @@ class Pump33:
         that the address is correct. This acts as a check to see that
         the pump is connected and working."""
         try:
-            self.write("VER")
-            resp = self.read(11)
-
+            resp = self.write("VER", 11)
             if int(resp[-3:-1]) != int(self.address):
                 raise PumpError("No response from pump at address %s" % self.address)
             logging.info(
@@ -440,15 +439,14 @@ class Pump33:
             string += "%s: %s\n" % (attr, self.__dict__[attr])
         return string
 
-    def write(self, command):
+    def write(self, command, read_bytes=5):
         self.serial.write(bytes(self.address + command + "\r", encoding="ascii"))
-
-    def read(self, num_bytes=5):
-        response = self.serial.read(num_bytes)
-
+        response = self.serial.read(read_bytes)
+        if self.verbose:
+            print("    {} - {}".format(command, response))
         if len(response) == 0:
             raise PumpError("%s: no response to command" % self.name)
-        return response.decode().rstrip()
+        return response.decode()
 
     def setmode(self, mode):
         """Set pump mode.
@@ -460,14 +458,11 @@ class Pump33:
         if mode not in ["AUT", "PRO", "CON"]:
             raise PumpError("%s: %s is not a mode name" % (self.name, mode))
 
-        self.write("MOD" + mode)
-        resp = self.read(5)
+        resp = self.write("MOD" + mode, 5)
 
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if mode has been set correctlry
-            self.write("MOD")
-            resp = self.read(15)
-
+            resp = self.write("MOD", 15)
             returned_mode = resp[1:-4]
 
             # Check mode was set accurately
@@ -482,7 +477,7 @@ class Pump33:
                 self.mode = mode
                 logging.info("%s: mode set to %s", self.name, self.mode)
         else:
-            raise PumpError("%s: unknown response to setmode" % self.name)
+            raise PumpError("%s: unknown response to setmode: '%s'" % (self.name, resp))
 
     def setdiameter1(self, diameter):
         """Set syringe 1 diameter (millimetres).
@@ -496,25 +491,20 @@ class Pump33:
             )
 
         # TODO: Got to be a better way of doing this with string formatting
-        diameter = str(diameter)
-
         # Pump only considers float format: ffffff
+        diameter = str(diameter)
         if len(diameter) > 6:
             diameter = diameter[0:6]
             diameter = remove_crud(diameter)
             logging.warning("%s: diameter truncated to %s mm", self.name, diameter)
         else:
             diameter = remove_crud(diameter)
-
-        # Send command
-        self.write("DIA A" + diameter)
-        resp = self.read(5)
+        resp = self.write("DIA A" + diameter)
 
         # Pump replies with address and status (:, < or >)
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if diameter has been set correctlry
-            self.write("DIA A")
-            resp = self.read(15)
+            resp = self.write("DIA A", 15)
 
             returned_diameter = resp[1:-4]
 
@@ -533,7 +523,9 @@ class Pump33:
                     "%s: syringe 1 diameter set to %s mm", self.name, self.diameter1
                 )
         else:
-            raise PumpError("%s: unknown response to setdiameter1" % self.name)
+            raise PumpError(
+                "%s: unknown response to setdiameter1: '%s'" % (self.name, resp)
+            )
 
     def setdiameter2(self, diameter):
         """Set syringe 2 diameter (millimetres) (only valid in Proportional
@@ -543,17 +535,13 @@ class Pump33:
         are in the following format: ffffff (e.g. 44.755 or 0.3257)
         """
         # Check if the pump is in Proportional mode
-        self.write("MOD")
-        resp = self.read(15)
-
+        resp = self.write("MOD", 15)
         returned_mode = resp[1:-4]
-
         if returned_mode != "PRO":
             raise PumpError(
                 "%s: set syringe 2 diameter is only valid in "
                 "Proportional mode" % self.name
             )
-
         if diameter > 50 or diameter < 0.1:
             raise PumpError(
                 "%s: diameter %s mm is out of range" % (self.name, str(diameter))
@@ -561,7 +549,6 @@ class Pump33:
 
         # TODO: Got to be a better way of doing this with string formatting
         diameter = str(diameter)
-
         # Pump only considers 2 d.p. - anymore are ignored
         if len(diameter) > 6:
             diameter = diameter[0:6]
@@ -571,17 +558,13 @@ class Pump33:
             diameter = remove_crud(diameter)
 
         # Send command
-        self.write("DIA B" + diameter)
-        resp = self.read(5)
+        resp = self.write("DIA B" + diameter)
 
         # Pump replies with address and status (:, < or >)
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if diameter has been set correctlry
-            self.write("DIA B")
-            resp = self.read(15)
-
+            resp = self.write("DIA B", 15)
             returned_diameter = resp[1:-4]
-
             # Check diameter was set accurately
             if float(returned_diameter) != float(diameter):
                 logging.error(
@@ -597,7 +580,9 @@ class Pump33:
                     "%s: syringe 2 diameter set to %s mm", self.name, self.diameter2
                 )
         else:
-            raise PumpError("%s: unknown response to setdiameter2" % self.name)
+            raise PumpError(
+                "%s: unknown response to setdiameter2: '%s'" % (self.name, resp)
+            )
 
     def setflowrate1(self, flowrate):
         """Set both syringe 1 and 2 to the same flow rate (microlitres per
@@ -619,16 +604,11 @@ class Pump33:
         else:
             flowrate = remove_crud(flowrate)
 
-        self.write("RAT A" + flowrate + "UM")
-        resp = self.read(5)
-
+        resp = self.write("RAT A" + flowrate + "UM")
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # Flow rate was sent, check it was set correctly
-            self.write("RAT A")
-            resp = self.read(20)
-
+            resp = self.write("RAT A", 20)
             returned_flowrate = remove_crud(resp[1:7])
-
             if float(returned_flowrate) != float(flowrate):
                 logging.error(
                     "%s: set flowrate (%s uL/min) does not match"
@@ -649,7 +629,9 @@ class Pump33:
                 "%s: flow rate (%s uL/min) is out of range" % (self.name, flowrate)
             )
         else:
-            raise PumpError("%s: unknown response to setflowrate1" % self.name)
+            raise PumpError(
+                "%s: unknown response to setflowrate1: '%s'" % (self.name, resp)
+            )
 
     def setflowrate2(self, flowrate):
         """Set syringe 2 flow rate (microlitres per minute)(only valid
@@ -662,36 +644,25 @@ class Pump33:
         range. This depends on the syringe diameter. See Pump 33 manual.
         """
         # Check if the pump is in Proportional mode
-        self.write("MOD")
-        resp = self.read(15)
-
+        resp = self.write("MOD", 15)
         returned_mode = resp[1:-4]
-
         if returned_mode != "PRO":
             raise PumpError(
                 "%s: set syringe 2 flow rate is only valid "
                 "in Proportional mode" % self.name
             )
-
         flowrate = str(flowrate)
-
         if len(flowrate) > 6:
             flowrate = flowrate[0:6]
             flowrate = remove_crud(flowrate)
             logging.warning("%s: flow rate truncated to %s uL/min", self.name, flowrate)
         else:
             flowrate = remove_crud(flowrate)
-
-        self.write("RAT B" + flowrate + "UM")
-        resp = self.read(5)
-
+        resp = self.write("RAT B" + flowrate + "UM")
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # Flow rate was sent, check it was set correctly
-            self.write("RAT B")
-            resp = self.read(20)
-
+            resp = self.write("RAT B")
             returned_flowrate = remove_crud(resp[1:7])
-
             if float(returned_flowrate) != float(flowrate):
                 logging.error(
                     "%s: set flowrate (%s uL/min) does not match"
@@ -712,38 +683,30 @@ class Pump33:
                 "%s: flow rate (%s uL/min) is out of range" % (self.name, flowrate)
             )
         else:
-            raise PumpError("%s: unknown response to setflowrate2" % self.name)
+            raise PumpError(
+                "%s: unknown response to setflowrate2: '%s'" % (self.name, resp)
+            )
 
     def setdirection1(self, direction):
         """Set syringe 1 direction.
 
-        Pump 33 has 3 direction settings: INF (infusion), REF (refill), REV
-        (reverse).
+        Pump 33 has 3 direction settings: INFUSE, REFILL, and REVERSE.
         """
         # Check if the input is a valid direction command
-        if direction not in ["INF", "REF", "REV"]:
+        if direction not in ["INFUSE", "REFILL", "REVERSE"]:
             raise PumpError("%s: %s is not a direction name" % (self.name, direction))
 
-        self.write("DIR")
-        resp = self.read(15)
-        original_dir = resp[1:4]
-
-        if original_dir == direction:
-            pass
-        else:
-            # this would change directions of both syringes
-            self.write("DIR REV")
-
-            resp = self.read(5)
-            # change syringe 2 direction back
+        resp = self.write("DIR", 15)
+        original_dir = resp[1:7]
+        if original_dir != direction:
+            # this will change the direction of both syringes
+            resp = self.write("DIR REV")
+            # change syringe 2 back to it's original direction
             self.par()
-
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if direction has been set correctlry
-            self.write("DIR")
-            resp = self.read(15)
-
-            returned_direction = resp[1:4]
+            resp = self.write("DIR", 15)
+            returned_direction = resp[1:7]
 
             if returned_direction != direction:
                 logging.error(
@@ -764,19 +727,14 @@ class Pump33:
     def setdirection2(self, direction):
         """Set syringe 2 direction.
 
-        Pump 33 has 3 direction setting: INF (infusion), REF (refill), REV
-        (reverse).
+        Pump 33 has 3 direction settings: INFUSE, REFILL and REVERSE.
         """
         # Check if the input is a valid direction command
-        if direction not in ["INF", "REF", "REV"]:
+        if direction not in ["INFUSE", "REFILL", "REVERSE"]:
             raise PumpError("%s: %s is not a direction name" % (self.name, direction))
-
-        self.write("DIR")
-        resp = self.read(15)
+        resp = self.write("DIR", 15)
         original_dir1 = resp[1:4]
-
-        self.write("PAR")
-        resp = self.read(15)
+        resp = self.write("PAR", 15)
         original_par = resp[1:-4]
 
         # set syringe 2 direction
@@ -786,17 +744,12 @@ class Pump33:
             pass
         else:
             self.par()
-
-        self.write("PAR")
-        resp = self.read(15)
-
+        resp = self.write("PAR", 15)
         returned_par = resp[1:-4]
 
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if direction has been set correctlry
-            self.write("DIR")
-            resp = self.read(15)
-
+            resp = self.write("DIR", 15)
             returned_direction = resp[1:4]
 
             if returned_direction != direction and returned_par == "ON":
@@ -825,20 +778,14 @@ class Pump33:
 
     def start(self):
         """Start the pump"""
-        self.write("RUN")
-
-        resp = self.read(5)
-
+        resp = self.write("RUN", 5)
         if resp[-1] != ">" and resp[-1] != "<":
             raise PumpError("%s: unknown response to start" % self.name)
         logging.info("%s: started", self.name)
 
     def stop(self):
         """Stop the pump"""
-        self.write("STP")
-
-        resp = self.read(5)
-
+        resp = self.write("STP", 5)
         if resp[-1] != ":":
             raise PumpError("%s: unexpected response to stop" % self.name)
         logging.info("%s: stopped", self.name)
@@ -850,35 +797,27 @@ class Pump33:
         ON = Parallel (syringes in the same direction)
         OFF = Reciprocal (syringes in the opposite direction)
         """
-        self.write("PAR")
-        resp = self.read(15)
+        resp = self.write("PAR", 15)
         original_par = resp[1:-4]
-
         if original_par == "ON":
-            self.write("PAR OFF")
-            resp = self.read(5)
-
+            resp = self.write("PAR OFF")
             if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
                 # check if Parallel/Reciprocal has been set correctlry
-                self.write("PAR")
-                resp = self.read(15)
+                resp = self.write("PAR", 15)
                 returned_par = resp[1:-4]
                 if returned_par != "OFF":
                     logging.error(
-                        "%s: set Parallel/Reciprocal (%s) does not work",
+                        "%s: set Parallel/Reciprocal (%s) did not work",
                         self.name,
                         self.name,
                     )
-                elif returned_par == "OFF":
-                    logging.info("%s: switch from Parallel to Reciprocal", self.name)
+                # elif returned_par == "OFF":
+                #     logging.info("%s: switch from Parallel to Reciprocal", self.name)
         elif original_par == "OFF":
-            self.write("PAR ON")
-            resp = self.read(5)
-
+            resp = self.write("PAR ON")
             if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
                 # check if Parallel/Reciprocal has been set correctlry
-                self.write("PAR")
-                resp = self.read(15)
+                resp = self.write("PAR", 15)
                 returned_par = resp[1:-4]
                 if returned_par != "ON":
                     logging.error(
@@ -886,14 +825,17 @@ class Pump33:
                         self.name,
                         self.name,
                     )
-                elif returned_par == "ON":
-                    logging.info("%s: switch from Reciprocal to Parallel", self.name)
+                # elif returned_par == "ON":
+                #     logging.info("%s: switch from Reciprocal to Parallel", self.name)
         else:
-            raise PumpError("%s: unknown response to setdirection" % self.name)
+            raise PumpError("%s: unknown response to par" % self.name)
 
 
 class PumpError(Exception):
-    pass
+    def __init__(self, msg):
+        self.msg = msg
+        logging.critical(msg)
+        super(PumpError, self).__init__(msg)
 
 
 # Command line options
