@@ -707,7 +707,8 @@ class Pump33:
             # check if direction has been set correctlry
             resp = self.write("DIR", 15)
             returned_direction = resp[1:7]
-
+            if direction == "REVERSE":
+                direction = self.get_other_direction(direction)
             if returned_direction != direction:
                 logging.error(
                     "%s: set syringe 1 direction (%s) does not match"
@@ -724,6 +725,23 @@ class Pump33:
         else:
             raise PumpError("%s: unknown response to setdirection1" % self.name)
 
+    def get_other_direction(self, direction):
+        return "REFILL" if direction == "INFUSE" else "INFUSE"
+
+    def get_direction_2(self):
+        """Return the current direction of syringe 2.
+
+        Syringe 2's direction is only indirectly controlled by setting
+        it to be in the same direction as or opposite to syringe 1.
+        """
+        direction1 = self.write("DIR", 15)[1:7]
+        parallel = self.write("PAR", 15)[1:-4]
+        if parallel == "ON":
+            direction2 = direction1
+        else:
+            direction2 = self.get_other_direction(direction1)
+        return direction2
+
     def setdirection2(self, direction):
         """Set syringe 2 direction.
 
@@ -732,46 +750,29 @@ class Pump33:
         # Check if the input is a valid direction command
         if direction not in ["INFUSE", "REFILL", "REVERSE"]:
             raise PumpError("%s: %s is not a direction name" % (self.name, direction))
-        resp = self.write("DIR", 15)
-        original_dir1 = resp[1:4]
-        resp = self.write("PAR", 15)
-        original_par = resp[1:-4]
 
-        # set syringe 2 direction
-        if original_dir1 == direction and original_par == "ON":
-            pass
-        elif original_dir1 != direction and original_par == "OFF":
-            pass
-        else:
+        start_direction_2 = self.get_direction_2()
+        if direction != start_direction_2:
             self.par()
-        resp = self.write("PAR", 15)
-        returned_par = resp[1:-4]
+        if direction == "REVERSE":
+            direction = self.get_other_direction(start_direction_2)
 
+        resp = self.write("PAR", 15)
         if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
             # check if direction has been set correctlry
-            resp = self.write("DIR", 15)
-            returned_direction = resp[1:4]
-
-            if returned_direction != direction and returned_par == "ON":
-                logging.error(
-                    "%s: set syringe 2 direction (%s) does not match"
-                    " direction returned by pump (%s)",
-                    self.name,
-                    direction,
-                    returned_direction,
-                )
-            elif returned_direction == direction and returned_par == "OFF":
-                logging.error(
-                    "%s: set syringe 2 direction (%s) does not match"
-                    " direction returned by pump (%s)",
-                    self.name,
-                    direction,
-                    returned_direction,
-                )
-            else:
+            direction2 = self.get_direction_2()
+            if direction2 == direction:
                 self.direction2 = direction
                 logging.info(
                     "%s: syringe 2 direction set to %s", self.name, self.direction2
+                )
+            else:
+                logging.error(
+                    "%s: set syringe 2 direction (%s) does not match"
+                    " direction returned by pump (%s)",
+                    self.name,
+                    direction,
+                    direction2,
                 )
         else:
             raise PumpError("%s: unknown response to setdirection2" % self.name)
