@@ -11,6 +11,18 @@ logging.basicConfig(
 )
 
 
+def _format_float(x):
+    """Helper function to convert floats to a fixed width of 6
+    characters
+    """
+    return str(float(x)).ljust(6, "0")[:6]
+
+
+def _int_to_char(x):
+    """Convert 1 to A, 2 to B, etc."""
+    return chr(x + 64)
+
+
 def remove_crud(string):
     """Return string without useless information.
 
@@ -398,15 +410,13 @@ class Pump33:
         name: used in logging. Default is Pump 33.
     """
 
-    def __init__(self, chain, address=0, name="Pump 33", verbose=False):
+    def __init__(self, port, address=0, name="Pump 33", verbose=False):
         self.name = name
-        self.serial = chain
+        self.serial = Chain(port)
         self.address = "{0:02.0f}".format(address)
-        self.mode = None
-        self.diameter1 = None
-        self.diameter2 = None
-        self.flowrate1 = None
-        self.flowrate2 = None
+        self.status = None
+        self.modes = ["Auto Stop", "Proportional", "Continuous"]
+        self.directions = ["Infuse", "Refill", "Reverse"]
         self.direction1 = None
         self.direction2 = None
         self.verbose = verbose
@@ -424,11 +434,9 @@ class Pump33:
             logging.info(
                 "Found pump %s at address %s", resp[1:-4], self.address,
             )
-
         except PumpError:
             self.serial.close()
             raise
-
         logging.info(
             "%s: created at address %s on %s", self.name, self.address, self.serial.port,
         )
@@ -439,357 +447,242 @@ class Pump33:
             string += "%s: %s\n" % (attr, self.__dict__[attr])
         return string
 
-    def write(self, command, read_bytes=5):
-        self.serial.write(bytes(self.address + command + "\r", encoding="ascii"))
-        response = self.serial.read(read_bytes)
-        if self.verbose:
-            print("    {} - {}".format(command, response))
-        if len(response) == 0:
-            raise PumpError("%s: no response to command" % self.name)
-        return response.decode()
+    def write(self, command, n=5):
+        """Write the specified command, then read back n bytes.
 
-    def setmode(self, mode):
+        The last three characters of every response from the pump are
+        XXY where XX is the address and Y is the pump status: ':', '>'
+        or '<' when stopped, running forwards, or running backwards,
+        respectively. This status is always checked to validate the
+        response and is stored in self.status.
+        """
+        self.serial.write(bytes(self.address + command + "\r", encoding="ascii"))
+        response_bytes = self.serial.read(n)
+        if self.verbose:
+            print("\t{} - {}".format(command, response_bytes))
+        response = response_bytes.decode()
+        if len(response) == 0:
+            raise PumpError("%s: No response to command '%s'" % (self.name, command))
+        if response[-1] in [":", ">", "<"]:
+            self.status = response[-1]
+        elif not "OOR" in response:
+            raise PumpError(
+                "%s: Unknown response '%s' to command '%s'"
+                % (self.name, response_bytes, command)
+            )
+        return response
+
+    def get_status(self):
+        """Return the current status. Can be ':', '>' or '<' when
+        stopped, running forwards, or running backwards, respectively.
+        """
+        self.get_mode()  # use to make sure the status is current
+        return self.status
+
+    def get_mode(self):
+        """Get pump mode.
+
+        Pump 33 has 3 modes: "Auto Stop", "Proportional", and
+        "Continuous".
+        """
+        mode = self.write("MOD", 15)[1:-4]
+        for m in self.modes:
+            if mode.lower() in m.lower():
+                return m
+        raise PumpError("%s: get_mode() returned bad mode '%s'" % (self.name, mode))
+
+    def set_mode(self, mode):
         """Set pump mode.
 
-        Pump 33 has 3 mode: Auto Stop, Proportional, and Continuous.
-        The Command for them are AUT, PRO, and CON, respectively.
+        Pump 33 has 3 modes: "Auto Stop", "Proportional", and
+        "Continuous".
         """
-        # Check if the input is a valid mode
-        if mode not in ["AUT", "PRO", "CON"]:
+        if mode not in self.modes:
             raise PumpError("%s: %s is not a mode name" % (self.name, mode))
-
-        resp = self.write("MOD" + mode, 5)
-
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # check if mode has been set correctlry
-            resp = self.write("MOD", 15)
-            returned_mode = resp[1:-4]
-
-            # Check mode was set accurately
-            if returned_mode != mode:
-                logging.error(
-                    "%s: set mode (%s) does not match mode" " returned by pump (%s)",
-                    self.name,
-                    mode,
-                    returned_mode,
-                )
-            elif returned_mode == mode:
-                self.mode = mode
-                logging.info("%s: mode set to %s", self.name, self.mode)
+        self.write("MOD" + mode[0:3].upper(), 5)
+        returned_mode = self.get_mode()
+        if returned_mode == mode:
+            logging.info("%s: Mode set to %s", self.name, mode)
         else:
-            raise PumpError("%s: unknown response to setmode: '%s'" % (self.name, resp))
-
-    def setdiameter1(self, diameter):
-        """Set syringe 1 diameter (millimetres).
-
-        Pump 33 syringe diameter range is 0.1-50 mm. Note that the diameters
-        are in the following format: ffffff (e.g. 44.755 or 0.3257)
-        """
-        if diameter > 50 or diameter < 0.1:
-            raise PumpError(
-                "%s: diameter %s mm is out of range" % (self.name, str(diameter))
+            logging.error(
+                "%s: Set mode '%s' does not match mode '%s' returned by pump",
+                self.name,
+                mode,
+                returned_mode,
             )
 
-        # TODO: Got to be a better way of doing this with string formatting
-        # Pump only considers float format: ffffff
-        diameter = str(diameter)
-        if len(diameter) > 6:
-            diameter = diameter[0:6]
-            diameter = remove_crud(diameter)
-            logging.warning("%s: diameter truncated to %s mm", self.name, diameter)
-        else:
-            diameter = remove_crud(diameter)
-        resp = self.write("DIA A" + diameter)
-
-        # Pump replies with address and status (:, < or >)
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # check if diameter has been set correctlry
-            resp = self.write("DIA A", 15)
-
-            returned_diameter = resp[1:-4]
-
-            # Check diameter was set accurately
-            if float(returned_diameter) != float(diameter):
-                logging.error(
-                    "%s: set diameter (%s mm) does not match diameter"
-                    "returned by pump (%s mm)",
-                    self.name,
-                    diameter,
-                    returned_diameter,
-                )
-            elif float(returned_diameter) == float(diameter):
-                self.diameter1 = float(returned_diameter)
-                logging.info(
-                    "%s: syringe 1 diameter set to %s mm", self.name, self.diameter1
-                )
-        else:
+    def _check_syringe_number(self, n):
+        """Validate the syringe number. Can only be 1 or 2."""
+        if n not in (1, 2):
             raise PumpError(
-                "%s: unknown response to setdiameter1: '%s'" % (self.name, resp)
+                "%s: Invalid syringe number '%s'.Must be 1 or 2." % (self.name, n)
             )
 
-    def setdiameter2(self, diameter):
-        """Set syringe 2 diameter (millimetres) (only valid in Proportional
-        (PRO) mode).
+    def _check_diameter(self, d):
+        """Validate the diameter. Muse be between 0.1 and 50 mm."""
+        if d > 50 or d < 0.1:
+            raise PumpError("%s: Diameter %s mm is out of range" % (self.name, d))
 
-        Pump 33 syringe diameter range is 0.1-50 mm. Note that the diameters
-        are in the following format: ffffff (e.g. 44.755 or 0.3257)
+    def get_diameter(self, syringe_num):
+        """Get the set diameter of the specified syringe.
+
+        For the pump, syringe 1 is A and syringe 2 is B.
         """
-        # Check if the pump is in Proportional mode
-        resp = self.write("MOD", 15)
-        returned_mode = resp[1:-4]
-        if returned_mode != "PRO":
+        self._check_syringe_number(syringe_num)
+        return self.write("DIA " + _int_to_char(syringe_num), 15)[1:-4]
+
+    def set_diameter(self, syringe_num, diameter_mm):
+        """Set the syringe diameter in millimetres.
+
+        Pump 33 syringe diameter range is 0.1-50 mm.
+        """
+        self._check_syringe_number(syringe_num)
+        self._check_diameter(diameter_mm)
+        diameter_mm = _format_float(diameter_mm)
+        self.write("DIA " + _int_to_char(syringe_num) + diameter_mm)
+        returned_diameter = self.get_diameter(syringe_num)
+        if float(diameter_mm) == float(returned_diameter):
+            logging.info(
+                "%s: Syringe %s diameter set to %s mm",
+                self.name,
+                syringe_num,
+                returned_diameter,
+            )
+        else:
+            logging.error(
+                "%s: Syringe %s set diameter '%s mm' does not match "
+                "diameter returned by pump '%s mm'",
+                self.name,
+                syringe_num,
+                diameter_mm,
+                returned_diameter,
+            )
+
+    def get_flow_rate(self, syringe_num):
+        """Return the currently set flow rate (uL/min) of the specified
+        syringe.
+        """
+        self._check_syringe_number(syringe_num)
+        return remove_crud(self.write("RAT " + _int_to_char(syringe_num), 20)[1:7])
+
+    def set_flow_rate(self, syringe_num, flow_rate):
+        """Set both syringe 1 and 2 to the same flow rate (uL/min) in
+        Auto Stop and Continuous mode.
+
+        In Proportional mode, it only sets flow rate for syringe 1.
+        Syringe 2's flow rate can only be set in Proportional mode.
+
+        The pump will tell you if the specified flow rate is out of
+        range. This depends on the syringe diameter. See Pump 33 manual.
+        """
+        self._check_syringe_number(syringe_num)
+        if syringe_num == 2 and self.get_mode() != self.modes[1]:
             raise PumpError(
-                "%s: set syringe 2 diameter is only valid in "
+                "%s: Syringe 2 flow rate can only be set directly in "
                 "Proportional mode" % self.name
             )
-        if diameter > 50 or diameter < 0.1:
+        flow_rate = _format_float(flow_rate)
+        if "OOR" in self.write("RAT " + _int_to_char(syringe_num) + flow_rate + "UM"):
             raise PumpError(
-                "%s: diameter %s mm is out of range" % (self.name, str(diameter))
+                "%s: Flow rate (%s uL/min) is out of range" % (self.name, flow_rate)
+            )
+        returned_flowrate = self.get_flow_rate(syringe_num)
+        if float(flow_rate) == float(returned_flowrate):
+            logging.info(
+                "%s: Syringe %s flow rate set to %s uL/min",
+                self.name,
+                syringe_num,
+                returned_flowrate,
+            )
+        else:
+            logging.error(
+                "%s: Set flow rate (%s uL/min) does not match flow rate"
+                " returned by pump (%s uL/min)",
+                self.name,
+                flow_rate,
+                returned_flowrate,
             )
 
-        # TODO: Got to be a better way of doing this with string formatting
-        diameter = str(diameter)
-        # Pump only considers 2 d.p. - anymore are ignored
-        if len(diameter) > 6:
-            diameter = diameter[0:6]
-            diameter = remove_crud(diameter)
-            logging.warning("%s: diameter truncated to %s mm", self.name, diameter)
-        else:
-            diameter = remove_crud(diameter)
-
-        # Send command
-        resp = self.write("DIA B" + diameter)
-
-        # Pump replies with address and status (:, < or >)
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # check if diameter has been set correctlry
-            resp = self.write("DIA B", 15)
-            returned_diameter = resp[1:-4]
-            # Check diameter was set accurately
-            if float(returned_diameter) != float(diameter):
-                logging.error(
-                    "%s: set diameter (%s mm) does not match diameter"
-                    " returned by pump (%s mm)",
-                    self.name,
-                    diameter,
-                    returned_diameter,
-                )
-            elif float(returned_diameter) == float(diameter):
-                self.diameter2 = float(returned_diameter)
-                logging.info(
-                    "%s: syringe 2 diameter set to %s mm", self.name, self.diameter2
-                )
-        else:
+    def _check_direction(self, direction):
+        if direction not in self.directions:
             raise PumpError(
-                "%s: unknown response to setdiameter2: '%s'" % (self.name, resp)
+                "%s: Invalid direction '%s'. Can be %s."
+                % (self.name, direction, self.directions)
             )
 
-    def setflowrate1(self, flowrate):
-        """Set both syringe 1 and 2 to the same flow rate (microlitres per
-        minute) in Auto Stop and Continuous mode. In Proportional mode, it
-        only sets flow rate for syringe 1.
-
-        Flow rate is converted to a string. Pump 33 requires it to have
-        the format: ffffff.
-
-        The pump will tell you if the specified flow rate is out of
-        range. This depends on the syringe diameter. See Pump 33 manual.
+    def _get_other_direction(self, direction):
+        """Return the other direction that isn't 'Reverse'. If 'Reverse'
+        is supplied, returns 'Infuse'.
         """
-        flowrate = str(flowrate)
+        self._check_direction(direction)
+        return self.directions[not self.directions.index(direction)]
 
-        if len(flowrate) > 6:
-            flowrate = flowrate[0:6]
-            flowrate = remove_crud(flowrate)
-            logging.warning("%s: flow rate truncated to %s uL/min", self.name, flowrate)
-        else:
-            flowrate = remove_crud(flowrate)
+    def get_direction(self, syringe_num):
+        """Return the current direction of the specified syringe.
 
-        resp = self.write("RAT A" + flowrate + "UM")
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # Flow rate was sent, check it was set correctly
-            resp = self.write("RAT A", 20)
-            returned_flowrate = remove_crud(resp[1:7])
-            if float(returned_flowrate) != float(flowrate):
-                logging.error(
-                    "%s: set flowrate (%s uL/min) does not match"
-                    "flowrate returned by pump (%s uL/min)",
-                    self.name,
-                    flowrate,
-                    returned_flowrate,
-                )
-            elif float(returned_flowrate) == float(flowrate):
-                self.flowrate1 = float(returned_flowrate)
-                logging.info(
-                    "%s: syringe 1 flow rate set to %s uL/min",
-                    self.name,
-                    str(self.flowrate1),
-                )
-        elif "OOR" in resp:
-            raise PumpError(
-                "%s: flow rate (%s uL/min) is out of range" % (self.name, flowrate)
-            )
-        else:
-            raise PumpError(
-                "%s: unknown response to setflowrate1: '%s'" % (self.name, resp)
-            )
-
-    def setflowrate2(self, flowrate):
-        """Set syringe 2 flow rate (microlitres per minute)(only valid
-        in Proportional (PRO) mode).
-
-        Flow rate is converted to a string. Pump 33 requires it to have
-        the format: ffffff.
-
-        The pump will tell you if the specified flow rate is out of
-        range. This depends on the syringe diameter. See Pump 33 manual.
-        """
-        # Check if the pump is in Proportional mode
-        resp = self.write("MOD", 15)
-        returned_mode = resp[1:-4]
-        if returned_mode != "PRO":
-            raise PumpError(
-                "%s: set syringe 2 flow rate is only valid "
-                "in Proportional mode" % self.name
-            )
-        flowrate = str(flowrate)
-        if len(flowrate) > 6:
-            flowrate = flowrate[0:6]
-            flowrate = remove_crud(flowrate)
-            logging.warning("%s: flow rate truncated to %s uL/min", self.name, flowrate)
-        else:
-            flowrate = remove_crud(flowrate)
-        resp = self.write("RAT B" + flowrate + "UM")
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # Flow rate was sent, check it was set correctly
-            resp = self.write("RAT B")
-            returned_flowrate = remove_crud(resp[1:7])
-            if float(returned_flowrate) != float(flowrate):
-                logging.error(
-                    "%s: set flowrate (%s uL/min) does not match"
-                    "flowrate returned by pump (%s uL/min)",
-                    self.name,
-                    flowrate,
-                    returned_flowrate,
-                )
-            elif float(returned_flowrate) == float(flowrate):
-                self.flowrate2 = float(returned_flowrate)
-                logging.info(
-                    "%s: syringe 2 flow rate set to %s uL/min",
-                    self.name,
-                    str(self.flowrate2),
-                )
-        elif "OOR" in resp:
-            raise PumpError(
-                "%s: flow rate (%s uL/min) is out of range" % (self.name, flowrate)
-            )
-        else:
-            raise PumpError(
-                "%s: unknown response to setflowrate2: '%s'" % (self.name, resp)
-            )
-
-    def setdirection1(self, direction):
-        """Set syringe 1 direction.
-
-        Pump 33 has 3 direction settings: INFUSE, REFILL, and REVERSE.
-        """
-        # Check if the input is a valid direction command
-        if direction not in ["INFUSE", "REFILL", "REVERSE"]:
-            raise PumpError("%s: %s is not a direction name" % (self.name, direction))
-
-        resp = self.write("DIR", 15)
-        original_dir = resp[1:7]
-        if original_dir != direction:
-            # this will change the direction of both syringes
-            resp = self.write("DIR REV")
-            # change syringe 2 back to it's original direction
-            self.par()
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # check if direction has been set correctlry
-            resp = self.write("DIR", 15)
-            returned_direction = resp[1:7]
-            if direction == "REVERSE":
-                direction = self.get_other_direction(direction)
-            if returned_direction != direction:
-                logging.error(
-                    "%s: set syringe 1 direction (%s) does not match"
-                    " direction returned by pump (%s)",
-                    self.name,
-                    direction,
-                    returned_direction,
-                )
-            elif returned_direction == direction:
-                self.direction1 = direction
-                logging.info(
-                    "%s: syringe 1 direction set to %s", self.name, self.direction1
-                )
-        else:
-            raise PumpError("%s: unknown response to setdirection1" % self.name)
-
-    def get_other_direction(self, direction):
-        return "REFILL" if direction == "INFUSE" else "INFUSE"
-
-    def get_direction_2(self):
-        """Return the current direction of syringe 2.
+        Pump 33 has 3 direction settings: Infuse, Refill, and Reverse.
 
         Syringe 2's direction is only indirectly controlled by setting
-        it to be in the same direction as or opposite to syringe 1.
+        it to be in the same direction as or opposite to syringe 1 using
+        parallel or reciprocal linking.
         """
-        direction1 = self.write("DIR", 15)[1:7]
-        parallel = self.write("PAR", 15)[1:-4]
-        if parallel == "ON":
-            direction2 = direction1
-        else:
-            direction2 = self.get_other_direction(direction1)
-        return direction2
+        self._check_syringe_number(syringe_num)
+        direction_1 = self.write("DIR", 15)[1:7].capitalize()
+        if syringe_num == 1:
+            return direction_1
+        par = self.write("PAR", 15)[1:-4]
+        return direction_1 if par == "ON" else self._get_other_direction(direction_1)
 
-    def setdirection2(self, direction):
-        """Set syringe 2 direction.
+    def set_direction(self, syringe_num, direction):
+        """Set syringe direction.
 
-        Pump 33 has 3 direction settings: INFUSE, REFILL and REVERSE.
+        Pump 33 has 3 direction settings: Infuse, Refill, and Reverse.
+
+        Syringe 2's direction is only indirectly controlled by setting
+        it to be in the same direction as or opposite to syringe 1 using
+        parallel or reciprocal linking.
         """
-        # Check if the input is a valid direction command
-        if direction not in ["INFUSE", "REFILL", "REVERSE"]:
-            raise PumpError("%s: %s is not a direction name" % (self.name, direction))
+        self._check_syringe_number(syringe_num)
+        self._check_direction(direction)
 
-        start_direction_2 = self.get_direction_2()
-        if direction != start_direction_2:
-            self.par()
-        if direction == "REVERSE":
-            direction = self.get_other_direction(start_direction_2)
-
-        resp = self.write("PAR", 15)
-        if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-            # check if direction has been set correctlry
-            direction2 = self.get_direction_2()
-            if direction2 == direction:
-                self.direction2 = direction
-                logging.info(
-                    "%s: syringe 2 direction set to %s", self.name, self.direction2
-                )
-            else:
-                logging.error(
-                    "%s: set syringe 2 direction (%s) does not match"
-                    " direction returned by pump (%s)",
-                    self.name,
-                    direction,
-                    direction2,
-                )
+        start_direction = self.get_direction(syringe_num)
+        if syringe_num == 1:
+            if start_direction != direction:
+                self.write("DIR REV")  # this will changes both syringes' directions
+                self.par()  # change syringe 2 back to it's original direction
         else:
-            raise PumpError("%s: unknown response to setdirection2" % self.name)
+            if direction != start_direction:
+                self.par()
+            if direction == "Reverse":
+                direction = self._get_other_direction(start_direction)
+
+        returned_direction = self.get_direction(syringe_num)
+        if direction in ("Reverse", returned_direction):
+            logging.info(
+                "%s: Syringe %s direction set to '%s'",
+                self.name,
+                syringe_num,
+                returned_direction,
+            )
+        else:
+            logging.error(
+                "%s: Set syringe %s direction '%s' does not match"
+                " direction returned by pump '%s'",
+                self.name,
+                syringe_num,
+                direction,
+                returned_direction,
+            )
 
     def start(self):
-        """Start the pump"""
-        resp = self.write("RUN", 5)
-        if resp[-1] != ">" and resp[-1] != "<":
-            raise PumpError("%s: unknown response to start" % self.name)
-        logging.info("%s: started", self.name)
+        """Start the pump."""
+        self.write("RUN", 5)
+        logging.info("%s: Started", self.name)
 
     def stop(self):
-        """Stop the pump"""
-        resp = self.write("STP", 5)
-        if resp[-1] != ":":
-            raise PumpError("%s: unexpected response to stop" % self.name)
-        logging.info("%s: stopped", self.name)
+        """Stop the pump."""
+        self.write("STP", 5)
+        logging.info("%s: Stopped", self.name)
 
     def par(self):
         """Switch the pump between parallel and reciprocal pumping
@@ -798,38 +691,13 @@ class Pump33:
         ON = Parallel (syringes in the same direction)
         OFF = Reciprocal (syringes in the opposite direction)
         """
-        resp = self.write("PAR", 15)
-        original_par = resp[1:-4]
-        if original_par == "ON":
-            resp = self.write("PAR OFF")
-            if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-                # check if Parallel/Reciprocal has been set correctlry
-                resp = self.write("PAR", 15)
-                returned_par = resp[1:-4]
-                if returned_par != "OFF":
-                    logging.error(
-                        "%s: set Parallel/Reciprocal (%s) did not work",
-                        self.name,
-                        self.name,
-                    )
-                # elif returned_par == "OFF":
-                #     logging.info("%s: switch from Parallel to Reciprocal", self.name)
-        elif original_par == "OFF":
-            resp = self.write("PAR ON")
-            if resp[-1] == ":" or resp[-1] == "<" or resp[-1] == ">":
-                # check if Parallel/Reciprocal has been set correctlry
-                resp = self.write("PAR", 15)
-                returned_par = resp[1:-4]
-                if returned_par != "ON":
-                    logging.error(
-                        "%s: set Parallel/Reciprocal (%s) does not work",
-                        self.name,
-                        self.name,
-                    )
-                # elif returned_par == "ON":
-                #     logging.info("%s: switch from Reciprocal to Parallel", self.name)
-        else:
-            raise PumpError("%s: unknown response to par" % self.name)
+        states = ["ON", "OFF"]
+        original_par = self.write("PAR", 15)[1:-4]
+        new_par = states[not states.index(original_par)]
+        self.write("PAR " + new_par)
+        returned_par = self.write("PAR", 15)[1:-4]
+        if returned_par != new_par:
+            logging.error("%s: Set Parallel/Reciprocal did not work", self.name)
 
 
 class PumpError(Exception):
